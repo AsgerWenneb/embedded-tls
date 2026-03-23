@@ -63,10 +63,9 @@ async fn test_google() {
         &mut write_record_buffer,
     );
 
-    let open_fut = tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ));
+    let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+    let open_fut = tls.open(&mut context);
+
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
     log::info!("Established");
@@ -113,10 +112,8 @@ async fn test_ping() {
 
     log::info!("SIZE of connection is {}", core::mem::size_of_val(&tls));
 
-    let open_fut = tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ));
+    let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+    let open_fut = tls.open(&mut context);
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
     log::info!("Established");
@@ -182,10 +179,8 @@ async fn test_ping_nocopy() {
 
     log::info!("SIZE of connection is {}", core::mem::size_of_val(&tls));
 
-    let open_fut = tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ));
+    let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+    let open_fut = tls.open(&mut context);
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
     log::info!("Established");
@@ -251,12 +246,8 @@ async fn test_ping_nocopy_bufread() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .await
-    .expect("error establishing TLS connection");
+    let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+    tls.open(&mut context).await.expect("error establishing TLS connection");
     log::info!("Established");
 
     tls.write(b"ping").await.expect("error writing data");

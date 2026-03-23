@@ -133,7 +133,8 @@ async fn test_client_certificate_auth() {
     log::info!("SIZE of connection is {}", core::mem::size_of_val(&tls));
 
     let mut provider = Provider::default();
-    let open_fut = tls.open(TlsContext::new(&config, &mut provider));
+    let mut context = TlsContext::new(&config, &mut provider);
+    let open_fut = tls.open(&mut context);
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
     log::info!("Established");

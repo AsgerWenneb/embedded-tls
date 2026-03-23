@@ -94,7 +94,7 @@ where
     /// instance must be recreated.
     pub async fn open<Provider>(
         &mut self,
-        mut context: TlsContext<'_, Provider>,
+        context: &mut TlsContext<'_, Provider>,
     ) -> Result<(), TlsError>
     where
         Provider: CryptoProvider<CipherSuite = CipherSuite>,

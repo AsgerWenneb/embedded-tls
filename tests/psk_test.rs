@@ -81,14 +81,8 @@ async fn test_psk_open() {
             &mut write_record_buffer,
         );
 
-        assert!(
-            tls.open(TlsContext::new(
-                &config,
-                UnsecureProvider::new::<Aes128GcmSha256>(OsRng)
-            ))
-            .await
-            .is_ok()
-        );
+        let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+        assert!(tls.open(&mut context).await.is_ok());
         println!("TLS session opened");
 
         tls.write(b"ping").await.unwrap();
