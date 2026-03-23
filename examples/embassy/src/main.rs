@@ -1,7 +1,7 @@
 use clap::Parser;
 use embassy_executor::{Executor, Spawner};
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{Config, Ipv4Address, Ipv4Cidr, StackResources, Stack};
+use embassy_net::{Config, Ipv4Address, Ipv4Cidr, Stack, StackResources};
 use embassy_net_tuntap::TunTapDevice;
 use embassy_time::Duration;
 use embedded_io_async::Write;
@@ -52,7 +52,8 @@ async fn main_task(spawner: Spawner) {
 
     // Init network stack
     static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
-    let (stack, runner) = embassy_net::new(device, config, RESOURCES.init(StackResources::new()), seed);
+    let (stack, runner) =
+        embassy_net::new(device, config, RESOURCES.init(StackResources::new()), seed);
 
     // Launch network task
     spawner.spawn(net_task(runner).unwrap());
@@ -78,12 +79,10 @@ async fn main_task(spawner: Spawner) {
     let config = TlsConfig::new().with_server_name("example.com");
     let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
 
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .await
-    .expect("error establishing TLS connection");
+    let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+    tls.open(&mut context)
+        .await
+        .expect("error establishing TLS connection");
 
     tls.write_all(b"ping").await.expect("error writing data");
     tls.flush().await.expect("error flushing data");

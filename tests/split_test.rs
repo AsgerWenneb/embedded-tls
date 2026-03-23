@@ -87,11 +87,9 @@ fn test_blocking_borrowed() {
         &mut write_record_buffer,
     );
 
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .expect("error establishing TLS connection");
+    let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+    tls.open(&mut context)
+        .expect("error establishing TLS connection");
 
     let (mut reader, mut writer) = tls.split();
 

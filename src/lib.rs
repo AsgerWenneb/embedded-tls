@@ -35,10 +35,11 @@ async fn main() {
 
     // Allows disabling cert verification, in case you are using PSK and don't need it, or are just testing.
     // otherwise, use embedded_tls::webpki::CertVerifier, which only works on std for now.
-    tls.open(TlsContext::new(
+    let mut context = TlsContext::new(
         &config,
         UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
+    );
+    tls.open(&mut context)
     .await
     .expect("error establishing TLS connection");
 

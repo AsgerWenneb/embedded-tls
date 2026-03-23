@@ -77,10 +77,11 @@ fn early_data_ignored() {
         &mut write_record_buffer,
     );
 
-    tls.open(TlsContext::new(
+    let mut context = TlsContext::new(
         &config,
         UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
+    );
+    tls.open(&mut context)
     .expect("error establishing TLS connection");
 
     tls.write_all(b"ping").expect("Failed to write data");

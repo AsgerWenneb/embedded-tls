@@ -83,7 +83,8 @@ async fn test_server_certificate_validation() {
         &mut write_record_buffer,
     );
 
-    let open_fut = tls.open(TlsContext::new(&config, WebPkiProvider::default()));
+    let mut context = TlsContext::new(&config, WebPkiProvider::default());
+    let open_fut = tls.open(&mut context);
 
     open_fut.await.expect("error establishing TLS connection");
 

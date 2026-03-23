@@ -41,13 +41,14 @@ fn main() {
         &mut write_record_buffer,
     );
 
-    tls.open(TlsContext::new(
+    let mut context = TlsContext::new(
         &config,
         Provider {
             rng: OsRng,
             verifier: CertVerifier::new(),
         },
-    ))
+    );
+    tls.open(&mut context)
     .expect("error establishing TLS connection");
 
     tls.write_all(b"ping").expect("error writing data");

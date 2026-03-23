@@ -130,13 +130,14 @@ async fn test_server_certificate_validation() {
         &mut write_record_buffer,
     );
 
-    let open_fut = tls.open(TlsContext::new(
+    let mut context = TlsContext::new(
         &config,
         RustPkiProvider {
             rng: OsRng,
             verifier: CertVerifier::new(),
         },
-    ));
+    );
+    let open_fut = tls.open(&mut context);
 
     open_fut.await.expect("error establishing TLS connection");
 
@@ -179,13 +180,14 @@ async fn test_mutual_certificate_validation() {
         &mut write_record_buffer,
     );
 
-    let open_fut = tls.open(TlsContext::new(
+    let mut context = TlsContext::new(
         &config,
         RustPkiProvider {
             rng: OsRng,
             verifier: CertVerifier::new(),
         },
-    ));
+    );
+    let open_fut = tls.open(&mut context);
 
     open_fut.await.expect("error establishing TLS connection");
 

@@ -247,7 +247,9 @@ async fn test_ping_nocopy_bufread() {
         &mut write_record_buffer,
     );
     let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
-    tls.open(&mut context).await.expect("error establishing TLS connection");
+    tls.open(&mut context)
+        .await
+        .expect("error establishing TLS connection");
     log::info!("Established");
 
     tls.write(b"ping").await.expect("error writing data");
@@ -289,11 +291,9 @@ fn test_blocking_ping() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .expect("error establishing TLS connection");
+    let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+    tls.open(&mut context)
+        .expect("error establishing TLS connection");
     log::info!("Established");
 
     tls.write(b"ping").expect("error writing data");
@@ -342,11 +342,9 @@ fn test_blocking_ping_nocopy() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .expect("error establishing TLS connection");
+    let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+    tls.open(&mut context)
+        .expect("error establishing TLS connection");
     log::info!("Established");
 
     tls.write(b"ping").expect("error writing data");
@@ -389,11 +387,9 @@ fn test_blocking_ping_nocopy_bufread() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .expect("error establishing TLS connection");
+    let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+    tls.open(&mut context)
+        .expect("error establishing TLS connection");
     log::info!("Established");
 
     tls.write(b"ping").expect("error writing data");

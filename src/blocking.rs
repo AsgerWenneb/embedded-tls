@@ -93,7 +93,7 @@ where
     ///
     /// Returns an error if the handshake does not proceed. If an error occurs, the connection
     /// instance must be recreated.
-    pub fn open<Provider>(&mut self, mut context: TlsContext<Provider>) -> Result<(), TlsError>
+    pub fn open<Provider>(&mut self, context: &mut TlsContext<Provider>) -> Result<(), TlsError>
     where
         Provider: CryptoProvider<CipherSuite = CipherSuite>,
     {

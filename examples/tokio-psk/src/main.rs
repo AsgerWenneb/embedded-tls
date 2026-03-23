@@ -25,12 +25,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &mut write_record_buffer,
     );
 
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .await
-    .expect("error establishing TLS connection");
+    let mut context = TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(OsRng));
+    tls.open(&mut context)
+        .await
+        .expect("error establishing TLS connection");
 
     tls.write_all(b"ping").await.expect("error writing data");
     tls.flush().await.expect("error flushing data");
