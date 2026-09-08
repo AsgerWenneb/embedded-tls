@@ -42,3 +42,20 @@ openssl x509 -req -CA rsa-ca-cert.pem -CAkey rsa-ca-key.pem -in rsa-server-cert.
 # Create RSA private key, certificate signing request (CSR) and certificate for client
 openssl req -newkey rsa:2048 -keyout rsa-client-key.pem -nodes -out rsa-client-cert.csr -sha256
 openssl x509 -req -CA rsa-ca-cert.pem -CAkey rsa-ca-key.pem -in rsa-client-cert.csr -out rsa-client-cert.pem -days 10000 -CAcreateserial
+
+# Create a second, independent root, standing in for a legacy root that
+# cross-signs `ca-cert.pem` for backwards compatibility (e.g. how AWS IoT
+# Core's "Amazon Root CA 1" is cross-signed by the Starfield root)
+openssl ecparam -name prime256v1 -genkey -noout -out alt-root-key.pem
+openssl req -new -x509 -sha256 -key alt-root-key.pem -days 10000 -out alt-root-cert.pem -subj "/CN=Alt Root"
+
+# Re-sign ca-cert.pem's own key under the alt root: same public key as
+# ca-cert.pem, but signed by a different issuer. Used to test that a
+# trailing chain entry the configured `ca` did NOT issue is ignored, rather
+# than treated as a hard chain-validation failure.
+openssl req -new -key ca-key.pem -out ca-cross.csr -subj "/CN=Test CA Cross-Signed"
+openssl x509 -req -in ca-cross.csr -CA alt-root-cert.pem -CAkey alt-root-key.pem -CAcreateserial -out ca-cross-signed.pem -days 10000 -sha256
+rm -f alt-root-cert.srl
+
+# Chain with a trailing entry beyond what's needed to reach `ca-cert.pem`
+cat im-server-cert.pem im-cert.pem ca-cross-signed.pem > chain-cert-trailing.pem

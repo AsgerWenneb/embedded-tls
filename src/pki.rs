@@ -19,8 +19,6 @@ use crate::handshake::{
 };
 use crate::parse_buffer::ParseError;
 use core::marker::PhantomData;
-#[cfg(feature = "defmt")]
-use defmt::Debug2Format;
 use der::Decode;
 use digest::Digest;
 use heapless::Vec;
@@ -28,40 +26,6 @@ use heapless::Vec;
 pub struct CertificateNames {
     pub common_name: Option<heapless::String<HOSTNAME_MAXLEN>>,
     pub san_dns_names: heapless::Vec<heapless::String<HOSTNAME_MAXLEN>, MAX_SAN_DNS_NAMES>,
-}
-
-pub struct CertificateChain<'a> {
-    prev: &'a CertificateEntryRef<'a>,
-    chain: &'a ServerCertificate<'a>,
-    idx: isize,
-}
-
-impl<'a> CertificateChain<'a> {
-    pub fn new(ca: &'a CertificateEntryRef, chain: &'a ServerCertificate<'a>) -> Self {
-        Self {
-            prev: ca,
-            chain,
-            idx: chain.entries.len() as isize - 1,
-        }
-    }
-}
-
-impl<'a> Iterator for CertificateChain<'a> {
-    type Item = (&'a CertificateEntryRef<'a>, &'a CertificateEntryRef<'a>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.idx < 0 {
-            return None;
-        }
-
-        let cur = &self.chain.entries[self.idx as usize];
-        let out = (self.prev, cur);
-
-        self.prev = cur;
-        self.idx -= 1;
-
-        Some(out)
-    }
 }
 
 pub struct CertVerifier<'a, CipherSuite, Clock, const CERT_SIZE: usize>
@@ -111,14 +75,7 @@ where
         transcript: &CipherSuite::Hash,
         cert: ServerCertificate,
     ) -> Result<(), TlsError> {
-        let mut names = CertificateNames {
-            common_name: None,
-            san_dns_names: heapless::Vec::new(),
-        };
-
-        for (p, q) in CertificateChain::new(&(&self.ca).into(), &cert) {
-            names = verify_certificate(p, q, Clock::now())?;
-        }
+        let names = verify_certificate_chain(&self.ca, &cert, Clock::now())?;
 
         if !tls_hostname_match(&names, &self.host) {
             error!(
@@ -282,197 +239,226 @@ fn get_certificate_tlv_bytes<'a>(input: &[u8]) -> der::Result<&[u8]> {
     reader.tlv_bytes()
 }
 
-fn get_cert_time(time: Time) -> u64 {
+fn get_cert_time(time: &Time) -> u64 {
     match time {
         Time::UtcTime(utc_time) => utc_time.to_unix_duration().as_secs(),
         Time::GeneralTime(generalized_time) => generalized_time.to_unix_duration().as_secs(),
     }
 }
 
-fn verify_certificate(
-    verifier: &CertificateEntryRef,
-    certificate: &CertificateEntryRef,
-    now: Option<u64>,
-) -> Result<CertificateNames, TlsError> {
-    let mut verified = false;
-    let mut common_name = None;
-    let mut san_dns_names = heapless::Vec::new();
+/// Checks whether `issuer_public_key` produced `subject`'s signature. A `false`
+/// result just means this issuer isn't the right one (expected while probing
+/// candidates); errors are reserved for problems with `subject` itself that no
+/// issuer choice could fix.
+fn verify_signature_only(
+    issuer_public_key: &[u8],
+    subject: &DecodedCertificate,
+    subject_der: &[u8],
+) -> Result<bool, TlsError> {
+    let signature_data = subject
+        .signature
+        .as_bytes()
+        .ok_or(TlsError::ParseError(ParseError::InvalidData))?;
 
-    let ca_certificate = if let CertificateEntryRef::X509(verifier) = verifier {
-        DecodedCertificate::from_der(verifier).map_err(|_| TlsError::DecodeError)?
-    } else {
-        return Err(TlsError::DecodeError);
+    let certificate_data =
+        get_certificate_tlv_bytes(subject_der).map_err(|_| TlsError::DecodeError)?;
+
+    let verified = match subject.signature_algorithm {
+        ECDSA_SHA256 => {
+            use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+            let Ok(verifying_key) = VerifyingKey::from_sec1_bytes(issuer_public_key) else {
+                return Ok(false);
+            };
+            let Ok(signature) = Signature::from_der(signature_data) else {
+                return Ok(false);
+            };
+            verifying_key.verify(&certificate_data, &signature).is_ok()
+        }
+        #[cfg(feature = "p384")]
+        ECDSA_SHA384 => {
+            use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
+            let Ok(verifying_key) = VerifyingKey::from_sec1_bytes(issuer_public_key) else {
+                return Ok(false);
+            };
+            let Ok(signature) = Signature::from_der(signature_data) else {
+                return Ok(false);
+            };
+            verifying_key.verify(&certificate_data, &signature).is_ok()
+        }
+        #[cfg(feature = "ed25519")]
+        ED25519 => {
+            use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+            let Ok(key_bytes) = issuer_public_key.try_into() else {
+                return Ok(false);
+            };
+            let Ok(verifying_key) = VerifyingKey::from_bytes(key_bytes) else {
+                return Ok(false);
+            };
+            let Ok(signature) = Signature::try_from(signature_data) else {
+                return Ok(false);
+            };
+            verifying_key.verify(certificate_data, &signature).is_ok()
+        }
+        #[cfg(feature = "rsa")]
+        a if a == RSA_PKCS1_SHA256 => {
+            use rsa::{
+                pkcs1::DecodeRsaPublicKey,
+                pkcs1v15::{Signature, VerifyingKey},
+                signature::Verifier,
+            };
+            use sha2::Sha256;
+
+            let Ok(verifying_key) = VerifyingKey::<Sha256>::from_pkcs1_der(issuer_public_key)
+            else {
+                return Ok(false);
+            };
+            let Ok(signature) = Signature::try_from(signature_data) else {
+                return Ok(false);
+            };
+            verifying_key.verify(certificate_data, &signature).is_ok()
+        }
+        #[cfg(feature = "rsa")]
+        a if a == RSA_PKCS1_SHA384 => {
+            use rsa::{
+                pkcs1::DecodeRsaPublicKey,
+                pkcs1v15::{Signature, VerifyingKey},
+                signature::Verifier,
+            };
+            use sha2::Sha384;
+
+            let Ok(verifying_key) = VerifyingKey::<Sha384>::from_pkcs1_der(issuer_public_key)
+            else {
+                return Ok(false);
+            };
+            let Ok(signature) = Signature::try_from(signature_data) else {
+                return Ok(false);
+            };
+            verifying_key.verify(certificate_data, &signature).is_ok()
+        }
+        #[cfg(feature = "rsa")]
+        a if a == RSA_PKCS1_SHA512 => {
+            use rsa::{
+                pkcs1::DecodeRsaPublicKey,
+                pkcs1v15::{Signature, VerifyingKey},
+                signature::Verifier,
+            };
+            use sha2::Sha512;
+
+            let Ok(verifying_key) = VerifyingKey::<Sha512>::from_pkcs1_der(issuer_public_key)
+            else {
+                return Ok(false);
+            };
+            let Ok(signature) = Signature::try_from(signature_data) else {
+                return Ok(false);
+            };
+            verifying_key.verify(certificate_data, &signature).is_ok()
+        }
+        _ => {
+            error!(
+                "Unsupported signature alg: {:?}",
+                subject.signature_algorithm
+            );
+            return Err(TlsError::InvalidSignatureScheme);
+        }
     };
 
-    if let CertificateEntryRef::X509(certificate) = certificate {
-        let parsed_certificate =
-            DecodedCertificate::from_der(certificate).map_err(|_| TlsError::DecodeError)?;
+    Ok(verified)
+}
 
-        let ca_public_key = ca_certificate
+fn check_validity(subject: &DecodedCertificate, now: Option<u64>) -> Result<(), TlsError> {
+    if let Some(now) = now {
+        if get_cert_time(&subject.tbs_certificate.validity.not_before) > now
+            || get_cert_time(&subject.tbs_certificate.validity.not_after) < now
+        {
+            return Err(TlsError::InvalidCertificate);
+        }
+        debug!("Epoch is {} and certificate is valid!", now)
+    }
+    Ok(())
+}
+
+fn decode_x509_entry<'a>(
+    entry: &CertificateEntryRef<'a>,
+) -> Result<(&'a [u8], DecodedCertificate<'a>), TlsError> {
+    let CertificateEntryRef::X509(der) = entry else {
+        return Err(TlsError::DecodeError);
+    };
+    let decoded = DecodedCertificate::from_der(der).map_err(|_| TlsError::DecodeError)?;
+    Ok((der, decoded))
+}
+
+/// Validates a server certificate chain against `ca`.
+///
+/// The chain is walked leaf-outward. At each step, `ca` is tried as the
+/// issuer first; as soon as it matches, the chain is trusted and any
+/// remaining (unneeded) entries the server sent are ignored — servers may
+/// send extra certificates beyond what's needed to reach a given trust
+/// anchor (e.g. a cross-signed root, for compatibility with other clients).
+/// If `ca` never matches, positional entries are chained (`entries[i]`
+/// issued by `entries[i+1]`) until one does.
+fn verify_certificate_chain(
+    ca: &Certificate<&[u8]>,
+    cert: &ServerCertificate,
+    now: Option<u64>,
+) -> Result<CertificateNames, TlsError> {
+    let entries = &cert.entries;
+
+    let (leaf_der, leaf_decoded) = entries
+        .first()
+        .ok_or(TlsError::InvalidCertificate)
+        .and_then(decode_x509_entry)?;
+
+    let common_name = extract_common_name(&leaf_decoded.tbs_certificate)
+        .map_err(|_| TlsError::DecodeError)?;
+    debug!("CommonName: {:?}", common_name);
+
+    let san_dns_names = extract_san_dns_names(&leaf_decoded.tbs_certificate)
+        .map_err(|_| TlsError::DecodeError)?;
+    debug!("SANs: {:?}", san_dns_names);
+
+    let ca_entry: CertificateEntryRef = ca.into();
+    let (_, ca_decoded) = decode_x509_entry(&ca_entry)?;
+    let ca_public_key = ca_decoded
+        .tbs_certificate
+        .subject_public_key_info
+        .public_key
+        .as_bytes()
+        .ok_or(TlsError::DecodeError)?;
+
+    let mut idx = 0;
+    let mut current_der = leaf_der;
+    let mut current_decoded = leaf_decoded;
+    let mut trusted = false;
+
+    loop {
+        if verify_signature_only(ca_public_key, &current_decoded, current_der)? {
+            check_validity(&current_decoded, now)?;
+            trusted = true;
+            break;
+        }
+
+        let Some(next_entry) = entries.get(idx + 1) else {
+            break;
+        };
+        let (next_der, next_decoded) = decode_x509_entry(next_entry)?;
+        let next_public_key = next_decoded
             .tbs_certificate
             .subject_public_key_info
             .public_key
             .as_bytes()
             .ok_or(TlsError::DecodeError)?;
 
-        common_name = extract_common_name(&parsed_certificate.tbs_certificate)
-            .map_err(|_| TlsError::DecodeError)?;
-        debug!("CommonName: {:?}", common_name);
-
-        san_dns_names = extract_san_dns_names(&parsed_certificate.tbs_certificate)
-            .map_err(|_| TlsError::DecodeError)?;
-        debug!("SANs: {:?}", san_dns_names);
-
-        if let Some(now) = now {
-            if get_cert_time(parsed_certificate.tbs_certificate.validity.not_before) > now
-                || get_cert_time(parsed_certificate.tbs_certificate.validity.not_after) < now
-            {
-                return Err(TlsError::InvalidCertificate);
-            }
-            debug!("Epoch is {} and certificate is valid!", now)
+        if !verify_signature_only(next_public_key, &current_decoded, current_der)? {
+            return Err(TlsError::InvalidCertificate);
         }
+        check_validity(&current_decoded, now)?;
 
-        let certificate_data =
-            get_certificate_tlv_bytes(certificate).map_err(|_| TlsError::DecodeError)?;
-
-        match parsed_certificate.signature_algorithm {
-            ECDSA_SHA256 => {
-                use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-                let verifying_key = VerifyingKey::from_sec1_bytes(ca_public_key)
-                    .map_err(|_| TlsError::DecodeError)?;
-
-                let signature = Signature::from_der(
-                    parsed_certificate
-                        .signature
-                        .as_bytes()
-                        .ok_or(TlsError::ParseError(ParseError::InvalidData))?,
-                )
-                .map_err(|_| TlsError::ParseError(ParseError::InvalidData))?;
-
-                verified = verifying_key.verify(&certificate_data, &signature).is_ok();
-            }
-            #[cfg(feature = "p384")]
-            ECDSA_SHA384 => {
-                use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
-                let verifying_key = VerifyingKey::from_sec1_bytes(ca_public_key)
-                    .map_err(|_| TlsError::DecodeError)?;
-
-                let signature = Signature::from_der(
-                    parsed_certificate
-                        .signature
-                        .as_bytes()
-                        .ok_or(TlsError::ParseError(ParseError::InvalidData))?,
-                )
-                .map_err(|_| TlsError::ParseError(ParseError::InvalidData))?;
-
-                verified = verifying_key.verify(&certificate_data, &signature).is_ok();
-            }
-            #[cfg(feature = "ed25519")]
-            ED25519 => {
-                use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-                let verifying_key: VerifyingKey =
-                    VerifyingKey::from_bytes(ca_public_key.try_into().unwrap())
-                        .map_err(|_| TlsError::DecodeError)?;
-
-                let signature = Signature::try_from(
-                    parsed_certificate
-                        .signature
-                        .as_bytes()
-                        .ok_or(TlsError::ParseError(ParseError::InvalidData))?,
-                )
-                .map_err(|_| TlsError::ParseError(ParseError::InvalidData))?;
-
-                verified = verifying_key.verify(certificate_data, &signature).is_ok();
-            }
-            #[cfg(feature = "rsa")]
-            a if a == RSA_PKCS1_SHA256 => {
-                use rsa::{
-                    pkcs1::DecodeRsaPublicKey,
-                    pkcs1v15::{Signature, VerifyingKey},
-                    signature::Verifier,
-                };
-                use sha2::Sha256;
-
-                let verifying_key =
-                    VerifyingKey::<Sha256>::from_pkcs1_der(ca_public_key).map_err(|e| {
-                        #[cfg(feature = "defmt")]
-                        error!("VerifyingKey: {:?}", Debug2Format(&e));
-                        #[cfg(not(feature = "defmt"))]
-                        error!("VerifyingKey: {}", e);
-                        TlsError::DecodeError
-                    })?;
-
-                let signature = Signature::try_from(
-                    parsed_certificate
-                        .signature
-                        .as_bytes()
-                        .ok_or(TlsError::ParseError(ParseError::InvalidData))?,
-                )
-                .map_err(|e| {
-                    #[cfg(feature = "defmt")]
-                    error!("Signature: {:?}", Debug2Format(&e));
-                    #[cfg(not(feature = "defmt"))]
-                    error!("Signature: {}", e);
-                    TlsError::ParseError(ParseError::InvalidData)
-                })?;
-
-                verified = verifying_key.verify(certificate_data, &signature).is_ok();
-            }
-            #[cfg(feature = "rsa")]
-            a if a == RSA_PKCS1_SHA384 => {
-                use rsa::{
-                    pkcs1::DecodeRsaPublicKey,
-                    pkcs1v15::{Signature, VerifyingKey},
-                    signature::Verifier,
-                };
-                use sha2::Sha384;
-
-                let verifying_key = VerifyingKey::<Sha384>::from_pkcs1_der(ca_public_key)
-                    .map_err(|_| TlsError::DecodeError)?;
-
-                let signature = Signature::try_from(
-                    parsed_certificate
-                        .signature
-                        .as_bytes()
-                        .ok_or(TlsError::ParseError(ParseError::InvalidData))?,
-                )
-                .map_err(|_| TlsError::ParseError(ParseError::InvalidData))?;
-
-                verified = verifying_key.verify(certificate_data, &signature).is_ok();
-            }
-            #[cfg(feature = "rsa")]
-            a if a == RSA_PKCS1_SHA512 => {
-                use rsa::{
-                    pkcs1::DecodeRsaPublicKey,
-                    pkcs1v15::{Signature, VerifyingKey},
-                    signature::Verifier,
-                };
-                use sha2::Sha512;
-
-                let verifying_key = VerifyingKey::<Sha512>::from_pkcs1_der(ca_public_key)
-                    .map_err(|_| TlsError::DecodeError)?;
-
-                let signature = Signature::try_from(
-                    parsed_certificate
-                        .signature
-                        .as_bytes()
-                        .ok_or(TlsError::ParseError(ParseError::InvalidData))?,
-                )
-                .map_err(|_| TlsError::ParseError(ParseError::InvalidData))?;
-
-                verified = verifying_key.verify(certificate_data, &signature).is_ok();
-            }
-            _ => {
-                error!(
-                    "Unsupported signature alg: {:?}",
-                    parsed_certificate.signature_algorithm
-                );
-                return Err(TlsError::InvalidSignatureScheme);
-            }
-        }
+        idx += 1;
+        current_der = next_der;
+        current_decoded = next_decoded;
     }
 
-    if !verified {
+    if !trusted {
         return Err(TlsError::InvalidCertificate);
     }
 
@@ -696,5 +682,61 @@ mod tests {
     fn invalid_characters_rejected() {
         assert!(!tls_hostname_match_impl(b"example!.com", b"example!.com"));
         assert!(!tls_hostname_match_impl(b"example.com", b"exa mple.com"));
+    }
+}
+
+#[cfg(test)]
+mod chain_verification_tests {
+    use super::*;
+
+    fn chain_of<'a>(entries: &[&'a [u8]]) -> ServerCertificate<'a> {
+        let mut cert = ServerCertificate::with_context(&[]);
+        for der in entries {
+            cert.add(CertificateEntryRef::X509(der)).unwrap();
+        }
+        cert
+    }
+
+    // The server sends [leaf, intermediate, decoy]: `intermediate` is
+    // directly signed by `ca`, but `decoy` shares `ca`'s public key while
+    // actually being signed by a different (untrusted) issuer — mirroring
+    // AWS IoT Core sending a cross-signed root cert beyond what's needed to
+    // reach the configured trust anchor. The walk must stop at
+    // `intermediate` and ignore `decoy`, not fail trying to verify it.
+    #[test]
+    fn chain_with_trailing_cross_signed_cert_succeeds() {
+        let leaf = pem_parser::pem_to_der(include_str!("../tests/data/im-server-cert.pem"));
+        let intermediate = pem_parser::pem_to_der(include_str!("../tests/data/im-cert.pem"));
+        let decoy = pem_parser::pem_to_der(include_str!("../tests/data/ca-cross-signed.pem"));
+        let ca = pem_parser::pem_to_der(include_str!("../tests/data/ca-cert.pem"));
+
+        let cert = chain_of(&[leaf.as_slice(), intermediate.as_slice(), decoy.as_slice()]);
+        let result = verify_certificate_chain(&Certificate::X509(ca.as_slice()), &cert, None);
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    // Without `decoy` in the chain, nothing presented ever chains up to
+    // `alt_root` (it only signs `decoy`, which isn't sent here), so the walk
+    // must exhaust the chain and fail rather than trust it anyway.
+    #[test]
+    fn chain_without_trust_anchor_match_fails() {
+        let leaf = pem_parser::pem_to_der(include_str!("../tests/data/im-server-cert.pem"));
+        let intermediate = pem_parser::pem_to_der(include_str!("../tests/data/im-cert.pem"));
+        let alt_root = pem_parser::pem_to_der(include_str!("../tests/data/alt-root-cert.pem"));
+
+        let cert = chain_of(&[leaf.as_slice(), intermediate.as_slice()]);
+        let result = verify_certificate_chain(&Certificate::X509(alt_root.as_slice()), &cert, None);
+        assert!(matches!(result, Err(TlsError::InvalidCertificate)));
+    }
+
+    #[test]
+    fn two_cert_chain_still_works() {
+        let leaf = pem_parser::pem_to_der(include_str!("../tests/data/im-server-cert.pem"));
+        let intermediate = pem_parser::pem_to_der(include_str!("../tests/data/im-cert.pem"));
+        let ca = pem_parser::pem_to_der(include_str!("../tests/data/ca-cert.pem"));
+
+        let cert = chain_of(&[leaf.as_slice(), intermediate.as_slice()]);
+        let result = verify_certificate_chain(&Certificate::X509(ca.as_slice()), &cert, None);
+        assert!(result.is_ok(), "{:?}", result.err());
     }
 }
